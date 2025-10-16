@@ -129,7 +129,7 @@ def process_task(data):
             else:
                 raise
 
-        html_code = generate_code(data['brief'], data['checks'], 1)
+        html_code = generate_code(data['brief'], data.get('checks', []), 1)
         create_or_update_file(repo, "index.html", "feat: Add application code", html_code)
         
         readme_content = generate_readme(repo_name, data['brief'], data['checks'], 1)
@@ -165,3 +165,4 @@ if __name__ == "__main__":
     import uvicorn
     print("Server starting...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
