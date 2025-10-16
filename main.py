@@ -132,7 +132,8 @@ def process_task(data):
         html_code = generate_code(data['brief'], data.get('checks', []), 1)
         create_or_update_file(repo, "index.html", "feat: Add application code", html_code)
         
-        readme_content = generate_readme(repo_name, data['brief'], data['checks'], 1)
+        readme_content = generate_readme(repo_name, data['brief'], data.get('checks', []), 1)
+
         create_or_update_file(repo, "README.md", "docs: Add project README", readme_content)
         
         create_or_update_file(repo, "LICENSE", "docs: Add MIT License", requests.get("https://api.github.com/licenses/mit").json()["body"])
@@ -165,4 +166,5 @@ if __name__ == "__main__":
     import uvicorn
     print("Server starting...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
