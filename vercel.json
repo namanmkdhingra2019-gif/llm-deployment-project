@@ -1,0 +1,30 @@
+id: sum-of-sales
+brief: Publish a single-page site that fetches data.csv from attachments, sums its sales column, sets the title to "Sales Summary ${seed}", displays the total inside #total-sales, and loads Bootstrap 5 from jsdelivr.
+attachments:
+  - name: data.csv
+    url: data:text/csv;base64,${seed}
+checks:
+  - js: document.title === `Sales Summary ${seed}`
+  - js: !!document.querySelector("link[href*='bootstrap']")
+  - js: Math.abs(parseFloat(document.querySelector("#total-sales").textContent) - ${result}) < 0.01
+round2:
+  - brief: Add a Bootstrap table #product-sales that lists each product with its total sales and keeps #total-sales accurate after render.
+    checks:
+      - js: document.querySelectorAll("#product-sales tbody tr").length >= 1
+      - js: >-
+          (() => {
+            const rows = [...document.querySelectorAll("#product-sales tbody tr td:last-child")];
+            const sum = rows.reduce((acc, cell) => acc + parseFloat(cell.textContent), 0);
+            return Math.abs(sum - ${result}) < 0.01;
+          })()
+  - brief: Introduce a currency select #currency-picker that converts the computed total using rates.json from attachments and mirrors the active currency inside #total-currency.
+    attachments:
+      - name: rates.json
+        url: data:application/json;base64,${seed}
+    checks:
+      - js: !!document.querySelector("#currency-picker option[value='USD']")
+      - js: !!document.querySelector("#total-currency")
+  - brief: Allow filtering by region via #region-filter, update #total-sales with the filtered sum, and set data-region on that element to the active choice.
+    checks:
+      - js: document.querySelector("#region-filter").tagName === "SELECT"
+      - js: document.querySelector("#total-sales").dataset.region !== undefined
