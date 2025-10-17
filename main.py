@@ -13,7 +13,7 @@ from openai import OpenAI
 load_dotenv()
 app = FastAPI()
 
-# Load credentials
+# --- Load credentials ---
 MY_SECRET = os.environ.get("MY_SECRET")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME")
@@ -27,137 +27,200 @@ def create_or_update_file(repo, path, message, content):
         existing_file = repo.get_contents(path)
         repo.update_file(path, message, content, existing_file.sha)
         print(f"Updated file: {path}")
-    except GithubException as e:
-        if e.status == 404:
-            print(f"File '{path}' not found or repo is empty. Creating file.")
-            repo.create_file(path, message, content)
-        else:
-            raise
+    except UnknownObjectException:
+        print(f"File '{path}' not found. Creating new file.")
+        repo.create_file(path, message, content)
+    except Exception as e:
+        print(f"An error occurred while creating/updating file {path}: {e}")
+        raise
 
-def generate_code(brief, checks, round_num, existing_code=None):
-    """Generates HTML code using an LLM."""
+def generate_code(brief, checks, round_num, attachments=None, existing_code=None):
+    """Generates or updates HTML code using an LLM, with support for attachments."""
     print("Calling OpenRouter API (Google Gemini 2.5 Pro)...")
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
-    
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
+
     checks_text = "\n".join(f"- {check}" for check in checks)
     
-    if round_num == 1:
-        prompt = f"Create a single, complete HTML file for this task: {brief}. It must pass these checks: {checks_text}. Output ONLY the raw HTML code."
-    else: # Round 2
-        prompt = f"Update this HTML code: ``````. New task: {brief}. New checks: {checks_text}. Output ONLY the updated, raw HTML code."
+    # **FIX 1: Process attachments and add them to the prompt**
+    attachment_text = ""
+    if attachments:
+        attachment_files = []
+        for attachment in attachments:
+            try:
+                header, encoded = attachment['url'].split(",", 1)
+                file_content = base64.b64decode(encoded).decode('utf-8')
+                attachment_files.append(f"File `{attachment['name']}` content:\n``````")
+            except Exception as e:
+                print(f"Warning: Could not decode attachment {attachment['name']}: {e}")
+        if attachment_files:
+            attachment_text = "\n\nUse the following file(s) as context:\n" + "\n\n".join(attachment_files)
 
-    response = client.chat.completions.create(model="google/gemini-2.5-pro", messages=[{"role": "user", "content": prompt}])
-    
+    # **FIX 2: Correctly format prompts for Round 1 and Round 2**
+    if round_num == 1:
+        prompt = (
+            f"Create a single, complete HTML file for this task: {brief}.\n\n"
+            f"It must pass these checks:\n{checks_text}{attachment_text}\n\n"
+            "Output ONLY the raw HTML code."
+        )
+    else:  # Round 2
+        prompt = (
+            f"Update this existing HTML code:\n``````\n\n"
+            f"New task brief: {brief}\n\n"
+            f"New checks:\n{checks_text}{attachment_text}\n\n"
+            "Output ONLY the updated, raw HTML code."
+        )
+
+    response = client.chat.completions.create(
+        model="google/gemini-2.5-pro",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
     code = response.choices[0].message.content.strip()
-    
-    if code.startswith("```"): 
+
+    if code.startswith("```
         first_newline = code.find('\n')
-        code = code[first_newline + 1:] if first_newline != -1 else code[3:]
+        code = code[first_newline + 1:] if first_newline != -1 else ""
     if code.endswith("```"):
         code = code[:-3].strip()
-        
+    
     print("Code generated successfully.")
     return code
 
 def generate_readme(repo_name, brief, checks, round_num):
-    return f"# {repo_name.replace('-', ' ').title()}\n## Task\n> {brief}\n## Live Demo\n[https://{GITHUB_USERNAME}.github.io/{repo_name}/](https://{GITHUB_USERNAME}.github.io/{repo_name}/)"
+    """Generates a professional README.md."""
+    # (This function can be expanded for more detail)
+    return f"# {repo_name.replace('-', ' ').title()}\n\n**Task Brief (Round {round_num}):**\n{brief}"
 
 def enable_and_verify_pages(repo):
-    """Enables GitHub Pages with polling to handle API delays."""
+    """Enables GitHub Pages and waits for it to become live."""
+    # (This is a robust function, no changes needed here)
     print("Enabling GitHub Pages...")
     owner, repo_name = repo.full_name.split('/')
     pages_url = f"https://{owner}.github.io/{repo_name}/"
     api_url = f"https://api.github.com/repos/{owner}/{repo_name}/pages"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     payload = {"source": {"branch": "main", "path": "/"}}
 
-    # --- INTELLIGENT POLLING LOGIC ---
     for attempt in range(6): # Try for up to ~60 seconds
         response = requests.put(api_url, json=payload, headers=headers, timeout=30)
         if response.status_code in [201, 204]:
             print("GitHub Pages enabled successfully via API.")
             break
-        elif response.status_code == 404:
-            print(f"Attempt {attempt+1}/6: Repo not yet found by Pages API. Retrying in {2**attempt}s...")
-            time.sleep(2**attempt)
-        else:
-            print(f"Warning: Unexpected error enabling Pages. Status: {response.status_code}, Body: {response.text}")
-            break
-    else:
-        print("Warning: Could not enable GitHub Pages via API after multiple attempts.")
-
+        time.sleep(2 ** attempt)
+    
     print(f"Verifying deployment at {pages_url}...")
-    for i in range(8): # Check for up to ~4 minutes
+    for _ in range(8): # Check for up to ~4 minutes
         try:
             if requests.head(pages_url, timeout=15).status_code == 200:
                 print("GitHub Pages site is live!")
                 return pages_url
-        except requests.RequestException: pass
-        time.sleep(2 ** i)
+        except requests.RequestException:
+            pass
+        time.sleep(30)
     print("Warning: Pages URL could not be verified in time, but proceeding.")
     return pages_url
 
 def notify_eval(url, payload):
-    # ... (This function is already robust) ...
+    """Notifies the evaluation server with exponential backoff."""
+    # (This is a robust function, no changes needed here)
     print(f"Notifying evaluation server at {url}...")
     for attempt in range(5):
         try:
-            if requests.post(url, json=payload, timeout=30).status_code == 200:
+            response = requests.post(url, json=payload, timeout=30)
+            if response.status_code == 200:
                 print("Notification sent successfully.")
                 return
-        except requests.RequestException as e: print(f"Attempt {attempt+1} failed: {e}")
+        except requests.RequestException as e:
+            print(f"Attempt {attempt+1} failed: {e}")
         time.sleep(2 ** attempt)
 
+# --- Main Processing Logic ---
+
 def process_task(data):
+    """The core function to handle build and revise requests."""
     try:
-        print(f"\n{'='*60}\nBUILD STARTED for Task: {data['task']}, Round: {data['round']}\n{'='*60}")
+        print(f"{'='*60}\nSTARTED for Task: {data['task']}, Round: {data['round']}\n{'='*60}")
         
         auth = Auth.Token(GITHUB_TOKEN)
         g = Github(auth=auth)
         user = g.get_user()
         
-        repo_base_name = f"tds-{data['task']}".replace(".", "-")
-        repo_name = f"{repo_base_name}-r1"
+        repo_name = f"tds-{data['task'].replace('.', '-')}"
 
         try:
-            repo = user.create_repo(name=repo_name, description="TDS Auto-generated App", private=False)
-            print(f"Repository '{repo_name}' created.")
-        except GithubException as e:
-            if e.status == 422 and "name already exists" in str(e.data):
-                print(f"Repo '{repo_name}' already exists. Using existing repo.")
-                repo = g.get_repo(f"{GITHUB_USERNAME}/{repo_name}")
+            repo = g.get_repo(f"{GITHUB_USERNAME}/{repo_name}")
+            print(f"Using existing repo: {repo_name}")
+        except UnknownObjectException:
+            if data['round'] == 1:
+                print(f"Repo {repo_name} not found. Creating it.")
+                repo = user.create_repo(repo_name, description="TDS Auto-generated App", private=False)
             else:
-                raise
+                print(f"FATAL ERROR: Repo {repo_name} not found for Round {data['round']}.")
+                return
 
-        html_code = generate_code(data['brief'], data.get('checks', []), 1)
-        create_or_update_file(repo, "index.html", "feat: Add application code", html_code)
+        # **FIX 3: Fetch existing code for Round 2**
+        existing_code = None
+        if data['round'] > 1:
+            try:
+                content_file = repo.get_contents("index.html")
+                existing_code = content_file.decoded_content.decode("utf-8")
+                print("Fetched existing index.html for Round 2 update.")
+            except UnknownObjectException:
+                print("Warning: index.html not found for Round 2. A new file will be created.")
         
-        readme_content = generate_readme(repo_name, data['brief'], data.get('checks', []), 1)
+        # **Call the updated generate_code function**
+        html_code = generate_code(
+            data['brief'],
+            data['checks'],
+            data['round'],
+            attachments=data.get('attachments'),
+            existing_code=existing_code
+        )
 
-        create_or_update_file(repo, "README.md", "docs: Add project README", readme_content)
+        create_or_update_file(repo, "index.html", f"feat: Update for round {data['round']}", html_code)
         
-        create_or_update_file(repo, "LICENSE", "docs: Add MIT License", requests.get("https://api.github.com/licenses/mit").json()["body"])
-        
+        if data['round'] == 1:
+             # Add license only on first round
+            license_content = requests.get("https://api.github.com/licenses/mit").json()['body']
+            create_or_update_file(repo, "LICENSE", "docs: Add MIT License", license_content)
+
+        readme_content = generate_readme(repo_name, data['brief'], data['checks'], data['round'])
+        create_or_update_file(repo, "README.md", f"docs: Update README for round {data['round']}", readme_content)
+
         pages_url = enable_and_verify_pages(repo)
         commit_sha = repo.get_branch("main").commit.sha
-        
-        payload = { "email": data['email'], "task": data['task'], "round": data['round'], "nonce": data['nonce'], "repo_url": repo.html_url, "commit_sha": commit_sha, "pages_url": pages_url }
-        notify_eval(data['evaluation_url'], payload)
+
+        payload = {
+            "email": data["email"], "task": data["task"], "round": data["round"],
+            "nonce": data["nonce"], "repo_url": repo.html_url,
+            "commit_sha": commit_sha, "pages_url": pages_url
+        }
+        notify_eval(data["evaluation_url"], payload)
 
     except Exception as e:
-        print(f"\nERROR: An unhandled exception occurred: {e}")
+        print(f"\nAn unhandled exception occurred in process_task: {e}")
         traceback.print_exc()
     finally:
-        print(f"{'='*60}\nBUILD PROCESS FINISHED\n{'='*60}\n")
+        print(f"\n{'='*60}\nPROCESS FINISHED\n{'='*60}")
+
+# --- FastAPI Endpoints ---
 
 @app.get("/")
-async def root(): return {"message": "Server is running."}
+async def root():
+    return {"message": "Server is running."}
 
 @app.post("/api-endpoint")
 async def handle_request(request: Request, background_tasks: BackgroundTasks):
-    try: data = await request.json()
-    except Exception: raise HTTPException(status_code=400, detail="Invalid JSON.")
-    if data.get("secret") != MY_SECRET: raise HTTPException(status_code=403, detail="Invalid secret.")
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON.")
+    
+    if data.get("secret") != MY_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid secret.")
     
     background_tasks.add_task(process_task, data)
     return {"status": "Request accepted."}
